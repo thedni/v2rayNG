@@ -1,0 +1,326 @@
+name: Build THEDNI APK
+
+# Manual build: GitHub -> Actions -> "Build THEDNI APK" -> Run workflow.
+# It renames the app label from v2rayNG to THEDNI, signs with a freshly
+# generated key and uploads the APKs as a downloadable artifact.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+      with:
+        submodules: 'recursive'
+        fetch-depth: '0'
+
+    - name: Add usage ring chart to subscription card
+      run: |
+        git apply --whitespace=nowarn <<'THEDNI_PATCH'
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        index dbf70a0..9638e7a 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        @@ -1,18 +1,19 @@
+         package com.v2ray.ang.ui.main
+         
+         import androidx.compose.foundation.BorderStroke
+        +import androidx.compose.foundation.Canvas
+         import androidx.compose.foundation.layout.Arrangement
+        +import androidx.compose.foundation.layout.Box
+         import androidx.compose.foundation.layout.Column
+         import androidx.compose.foundation.layout.Row
+         import androidx.compose.foundation.layout.Spacer
+        +import androidx.compose.foundation.layout.fillMaxSize
+         import androidx.compose.foundation.layout.fillMaxWidth
+        -import androidx.compose.foundation.layout.height
+         import androidx.compose.foundation.layout.padding
+         import androidx.compose.foundation.layout.size
+        -import androidx.compose.foundation.shape.RoundedCornerShape
+        +import androidx.compose.foundation.layout.width
+         import androidx.compose.material3.Icon
+         import androidx.compose.material3.IconButton
+        -import androidx.compose.material3.LinearProgressIndicator
+         import androidx.compose.material3.MaterialTheme
+         import androidx.compose.material3.Surface
+         import androidx.compose.material3.Text
+        @@ -20,7 +21,10 @@ import androidx.compose.runtime.Composable
+         import androidx.compose.runtime.remember
+         import androidx.compose.ui.Alignment
+         import androidx.compose.ui.Modifier
+        -import androidx.compose.ui.draw.clip
+        +import androidx.compose.ui.geometry.Offset
+        +import androidx.compose.ui.geometry.Size
+        +import androidx.compose.ui.graphics.StrokeCap
+        +import androidx.compose.ui.graphics.drawscope.Stroke
+         import androidx.compose.ui.res.painterResource
+         import androidx.compose.ui.res.stringResource
+         import androidx.compose.ui.semantics.clearAndSetSemantics
+        @@ -33,10 +37,14 @@ import com.v2ray.ang.dto.entities.SubscriptionUsageInfo
+         import com.v2ray.ang.extension.toTrafficString
+         import com.v2ray.ang.handler.SubscriptionInfoParser
+         import com.v2ray.ang.util.Utils
+        +import kotlin.math.roundToInt
+         
+         private const val MILLIS_PER_SECOND = 1000L
+         private const val EXPIRY_DATE_PATTERN = "yyyy-MM-dd"
+         private const val CARD_ALPHA = 0.97f
+        +private const val PERCENT_SCALE = 100
+        +private val RING_SIZE = 72.dp
+        +private val RING_STROKE = 8.dp
+         
+         /** Locale-neutral values the subscription information box renders. */
+         internal data class SubscriptionInfoUiModel(
+        @@ -54,6 +62,9 @@ internal data class SubscriptionInfoUiModel(
+         ) {
+             val trafficLow: Boolean get() = trafficFraction != null && trafficFraction >= TRAFFIC_WARNING_FRACTION
+         
+        +    /** Used share of the quota as a whole percent for the ring chart; null when unlimited. */
+        +    val percent: Int? get() = trafficFraction?.let { (it * PERCENT_SCALE).roundToInt() }
+        +
+             companion object {
+                 const val TRAFFIC_WARNING_FRACTION = 0.9f
+             }
+        @@ -136,26 +147,24 @@ internal fun SubscriptionInfoCard(
+                     }
+         
+                     // One semantics node for the read-only figures so TalkBack reads them in one go.
+        -            Column(
+        +            Row(
+                         Modifier
+                             .fillMaxWidth()
+        -                    .padding(end = 8.dp)
+        -                    .semantics(mergeDescendants = true) {}
+        +                    .padding(end = 8.dp, top = 4.dp)
+        +                    .semantics(mergeDescendants = true) {},
+        +                verticalAlignment = Alignment.CenterVertically,
+                     ) {
+        -                StatsRow(model)
+        -                model.trafficFraction?.let { fraction ->
+        -                    Spacer(Modifier.height(4.dp))
+        -                    LinearProgressIndicator(
+        -                        progress = { fraction },
+        -                        modifier = Modifier
+        -                            .fillMaxWidth()
+        -                            .height(4.dp)
+        -                            .clip(RoundedCornerShape(2.dp))
+        -                            .clearAndSetSemantics {},
+        -                        color = if (model.trafficLow) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+        -                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        +                val fraction = model.trafficFraction
+        +                val percent = model.percent
+        +                if (fraction != null && percent != null) {
+        +                    UsageRing(
+        +                        fraction = fraction,
+        +                        percentText = stringResource(R.string.sub_info_percent, percent),
+        +                        low = model.trafficLow,
+                             )
+        +                    Spacer(Modifier.width(16.dp))
+                         }
+        +                StatsColumn(model, Modifier.weight(1f))
+                     }
+                 }
+             }
+        @@ -168,24 +177,69 @@ private fun CardIconButton(iconRes: Int, contentDescription: String, onClick: ()
+             }
+         }
+         
+        +/** Circular usage chart: a track ring with the used share drawn clockwise from the top. */
+        +@Composable
+        +private fun UsageRing(
+        +    fraction: Float,
+        +    percentText: String,
+        +    low: Boolean,
+        +    modifier: Modifier = Modifier,
+        +) {
+        +    val progressColor = if (low) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+        +    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+        +    Box(modifier.size(RING_SIZE), contentAlignment = Alignment.Center) {
+        +        Canvas(Modifier.fillMaxSize().clearAndSetSemantics {}) {
+        +            val stroke = Stroke(width = RING_STROKE.toPx(), cap = StrokeCap.Round)
+        +            val inset = stroke.width / 2f
+        +            val topLeft = Offset(inset, inset)
+        +            val arcSize = Size(size.width - stroke.width, size.height - stroke.width)
+        +            drawArc(
+        +                color = trackColor,
+        +                startAngle = 0f,
+        +                sweepAngle = 360f,
+        +                useCenter = false,
+        +                topLeft = topLeft,
+        +                size = arcSize,
+        +                style = stroke,
+        +            )
+        +            if (fraction > 0f) {
+        +                drawArc(
+        +                    color = progressColor,
+        +                    startAngle = -90f,
+        +                    sweepAngle = 360f * fraction,
+        +                    useCenter = false,
+        +                    topLeft = topLeft,
+        +                    size = arcSize,
+        +                    style = stroke,
+        +                )
+        +            }
+        +        }
+        +        Text(
+        +            text = percentText,
+        +            style = MaterialTheme.typography.labelLarge,
+        +            fontWeight = FontWeight.SemiBold,
+        +            color = if (low) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        +            maxLines = 1,
+        +        )
+        +    }
+        +}
+        +
+         @Composable
+        -private fun StatsRow(model: SubscriptionInfoUiModel) {
+        +private fun StatsColumn(model: SubscriptionInfoUiModel, modifier: Modifier = Modifier) {
+             val totalText = if (model.totalBytes > 0L) {
+                 model.totalBytes.toTrafficString()
+             } else {
+                 stringResource(R.string.sub_info_unlimited)
+             }
+        -    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        +    Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                 Text(
+                     text = stringResource(R.string.sub_info_traffic, model.usedBytes.toTrafficString(), totalText),
+        -            modifier = Modifier.weight(1f, fill = false),
+        -            style = MaterialTheme.typography.bodySmall,
+        +            style = MaterialTheme.typography.bodyMedium,
+                     color = if (model.trafficLow) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                     maxLines = 1,
+                     overflow = TextOverflow.Ellipsis,
+                 )
+                 model.expireMillis?.let { expireMillis ->
+        -            Spacer(Modifier.size(8.dp))
+                     Text(
+                         text = Utils.formatTimestamp(expireMillis, EXPIRY_DATE_PATTERN),
+                         style = MaterialTheme.typography.bodySmall,
+        diff --git a/V2rayNG/app/src/main/res/values/strings.xml b/V2rayNG/app/src/main/res/values/strings.xml
+        index 37b8936..b2a164e 100644
+        --- a/V2rayNG/app/src/main/res/values/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values/strings.xml
+        @@ -564,5 +564,6 @@
+             <string name="sub_info_open_page">Open subscription page</string>
+             <string name="sub_info_traffic" translatable="false">%1$s / %2$s</string>
+             <string name="sub_info_unlimited">Unlimited</string>
+        +    <string name="sub_info_percent" translatable="false">%1$d%%</string>
+         
+         </resources>
+        diff --git a/V2rayNG/app/src/test/java/com/v2ray/ang/ui/main/MainSubscriptionInfoTest.kt b/V2rayNG/app/src/test/java/com/v2ray/ang/ui/main/MainSubscriptionInfoTest.kt
+        index 2bc061d..173b802 100644
+        --- a/V2rayNG/app/src/test/java/com/v2ray/ang/ui/main/MainSubscriptionInfoTest.kt
+        +++ b/V2rayNG/app/src/test/java/com/v2ray/ang/ui/main/MainSubscriptionInfoTest.kt
+        @@ -23,9 +23,18 @@ class MainSubscriptionInfoTest {
+                 val model = buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 5), now)
+                 assertEquals(0L, model.totalBytes)
+                 assertNull(model.trafficFraction)
+        +        assertNull(model.percent)
+                 assertFalse(model.trafficLow)
+             }
+         
+        +    @Test
+        +    fun percentIsRoundedForTheRingChart() {
+        +        assertEquals(40, buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 400, total = 1000), now).percent)
+        +        assertEquals(0, buildSubscriptionInfoUiModel(SubscriptionUsageInfo(total = 1000), now).percent)
+        +        assertEquals(34, buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 337, total = 1000), now).percent)
+        +        assertEquals(100, buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 2000, total = 1000), now).percent)
+        +    }
+        +
+             @Test
+             fun overUsageIsClampedAndFlaggedLow() {
+                 val model = buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 2000, total = 1000), now)
+        THEDNI_PATCH
+
+    - name: Rename app to THEDNI
+      run: |
+        find V2rayNG/app/src/main/res -name strings.xml -exec sed -i \
+          -e 's|<string name="app_name" translatable="false">v2rayNG</string>|<string name="app_name" translatable="false">THEDNI</string>|' \
+          -e 's|\(name="app_widget_name">\)v2rayNG<|\1THEDNI<|' \
+          -e 's|\(name="app_tile_name">\)v2rayNG<|\1THEDNI<|' {} +
+        sed -i 's/"v2rayNG_/"THEDNI_/g' V2rayNG/app/build.gradle.kts
+        echo "Remaining app_name values:"
+        grep -rh 'name="app_name"' V2rayNG/app/src/main/res | sort | uniq -c
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v4
+      with:
+        log-accepted-android-sdk-licenses: false
+        cmdline-tools-version: '14742923'
+        packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+
+    - name: Install NDK
+      run: |
+        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+          --channel=0 \
+          --install "ndk;30.0.16248370"
+        echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> $GITHUB_ENV
+        sed -i '10i\
+        \
+            ndkVersion = "30.0.16248370"' ${{ github.workspace }}/V2rayNG/app/build.gradle.kts
+
+    - name: Build libhevtun
+      run: |
+        bash compile-hevtun.sh
+
+    - name: Copy libhevtun
+      run: |
+        cp -r ${{ github.workspace }}/libs ${{ github.workspace }}/V2rayNG/app
+
+    - name: Fetch AndroidLibXrayLite tag
+      run: |
+        pushd AndroidLibXrayLite
+        CURRENT_TAG=$(git describe --tags --abbrev=0)
+        echo "Current tag in this repo: $CURRENT_TAG"
+        echo "CURRENT_TAG=$CURRENT_TAG" >> $GITHUB_ENV
+        popd
+
+    - name: Download libv2ray
+      uses: robinraju/release-downloader@v1.13
+      with:
+        repository: '2dust/AndroidLibXrayLite'
+        tag: ${{ env.CURRENT_TAG }}
+        fileName: 'libv2ray.aar'
+        out-file-path: V2rayNG/app/libs/
+
+    - name: Setup Java
+      uses: actions/setup-java@v6.1.0
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+
+    - name: Generate signing key
+      run: |
+        PASS=$(openssl rand -hex 16)
+        echo "::add-mask::$PASS"
+        keytool -genkeypair -keystore "$RUNNER_TEMP/thedni.jks" -alias thedni \
+          -keyalg RSA -keysize 2048 -validity 10000 \
+          -storepass "$PASS" -keypass "$PASS" -dname "CN=THEDNI"
+        echo "KS_PASS=$PASS" >> $GITHUB_ENV
+
+    - name: Build APK
+      run: |
+        cd ${{ github.workspace }}/V2rayNG
+        echo "sdk.dir=${ANDROID_HOME}" > local.properties
+        chmod 755 gradlew
+        ./gradlew assembleRelease \
+          -Pandroid.injected.signing.store.file=$RUNNER_TEMP/thedni.jks \
+          -Pandroid.injected.signing.store.password=$KS_PASS \
+          -Pandroid.injected.signing.key.alias=thedni \
+          -Pandroid.injected.signing.key.password=$KS_PASS
+
+    - name: Upload APKs
+      uses: actions/upload-artifact@v7
+      if: ${{ success() }}
+      with:
+        name: THEDNI-apk
+        path: |
+          ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/*/release/*arm64-v8a*.apk
+          ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/*/release/*universal*.apk
