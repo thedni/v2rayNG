@@ -239,6 +239,153 @@ jobs:
                  val model = buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 2000, total = 1000), now)
         THEDNI_PATCH
 
+    - name: Update About screen (Telegram link, footer text)
+      run: |
+        git apply --whitespace=nowarn <<'THEDNI_PATCH'
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/AppConfig.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/AppConfig.kt
+        index eead823..acb6452 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/AppConfig.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/AppConfig.kt
+        @@ -133,7 +133,7 @@ object AppConfig {
+             const val APP_WIKI_MODE = "$APP_URL/wiki/Mode"
+             const val APP_PRIVACY_POLICY = "$GITHUB_RAW_URL/2dust/v2rayNG/master/CR.md"
+             const val APP_PROMOTION_URL = "aHR0cHM6Ly85LjIzNDQ1Ni54eXovYWJjLmh0bWw="
+        -    const val TG_CHANNEL_URL = "https://t.me/github_2dust"
+        +    const val TG_CHANNEL_URL = "https://t.me/thedni"
+             const val DELAY_TEST_URL = "https://www.gstatic.com/generate_204"
+             const val DELAY_TEST_URL2 = "https://www.google.com/generate_204"
+             const val OBSERVATORY_LEAST_PING_INTERVAL = "3m"
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt
+        index 819d65e..886ea80 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt
+        @@ -63,8 +63,7 @@ fun AboutScreen(
+             val context = LocalContext.current
+             var showOssDialog by remember { mutableStateOf(false) }
+         
+        -    val libVersion = CoreNativeManager.getLibVersion()
+        -    val versionText = "v${BuildConfig.VERSION_NAME} ($libVersion)"
+        +    val versionText = "THEDNI\nRoyal Payments Inc Group"
+             val appIdText = BuildConfig.APPLICATION_ID
+         
+             Scaffold(
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Components.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Components.kt
+        index fbece27..9693409 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Components.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Components.kt
+        @@ -52,6 +52,7 @@ import androidx.compose.ui.res.painterResource
+         import androidx.compose.ui.res.stringResource
+         import androidx.compose.ui.text.TextStyle
+         import androidx.compose.ui.text.input.ImeAction
+        +import androidx.compose.ui.text.style.TextAlign
+         import androidx.compose.ui.text.style.TextOverflow
+         import androidx.compose.ui.unit.dp
+         import androidx.compose.ui.unit.sp
+        @@ -253,7 +254,11 @@ fun VersionInfoBlock(
+                     .padding(16.dp),
+                 horizontalAlignment = Alignment.CenterHorizontally
+             ) {
+        -        Text(text = versionText, style = MaterialTheme.typography.bodySmall)
+        +        Text(
+        +            text = versionText,
+        +            style = MaterialTheme.typography.bodySmall,
+        +            textAlign = TextAlign.Center
+        +        )
+                 if (appIdText != null) {
+                     Spacer(modifier = Modifier.height(4.dp))
+                     Text(text = appIdText, style = MaterialTheme.typography.bodySmall)
+        THEDNI_PATCH
+
+    - name: Add one-tap ping button to subscription card
+      run: |
+        git apply --whitespace=nowarn <<'THEDNI_PATCH'
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt
+        index af12514..96a6e38 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt
+        @@ -382,7 +382,7 @@ object SettingsManager {
+              * @return The number of concurrent real-ping tests (clamped to 1..64).
+              */
+             fun getRealPingConcurrency(): Int {
+        -        val value = MmkvManager.decodeSettingsString(AppConfig.PREF_REAL_PING_CONCURRENCY)?.toIntOrNull() ?: 16
+        +        val value = MmkvManager.decodeSettingsString(AppConfig.PREF_REAL_PING_CONCURRENCY)?.toIntOrNull() ?: 32
+                 return value.coerceIn(1, 128)
+             }
+         
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt
+        index cf40a55..e324318 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt
+        @@ -147,6 +147,7 @@ fun GroupPagerPage(
+                         fallbackTitle = groupTitle,
+                         onOpenLink = onOpenLink,
+                         onRefresh = { mainViewModel.onAction(MainAction.UpdateGroupSubscription(groupId)) },
+        +                onPing = { mainViewModel.onAction(MainAction.TestRealAllServers) },
+                         modifier = Modifier
+                             .align(Alignment.TopCenter)
+                             .onSizeChanged { infoHeightPx = it.height }
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        index 9638e7a..75cad36 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        @@ -98,6 +98,7 @@ internal fun SubscriptionInfoCard(
+             fallbackTitle: String,
+             onOpenLink: (String) -> Unit,
+             onRefresh: () -> Unit,
+        +    onPing: () -> Unit,
+             modifier: Modifier = Modifier,
+         ) {
+             val model = remember(info) { buildSubscriptionInfoUiModel(info, System.currentTimeMillis()) }
+        @@ -139,6 +140,11 @@ internal fun SubscriptionInfoCard(
+                                 onClick = { onOpenLink(url) },
+                             )
+                         }
+        +                CardIconButton(
+        +                    iconRes = R.drawable.ic_flash_on_24dp,
+        +                    contentDescription = stringResource(R.string.sub_info_ping),
+        +                    onClick = onPing,
+        +                )
+                         CardIconButton(
+                             iconRes = R.drawable.ic_refresh_24dp,
+                             contentDescription = stringResource(R.string.title_sub_update),
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt
+        index a65d2fa..eeb5a0f 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt
+        @@ -178,7 +178,7 @@ fun SettingsScreen(
+         
+             var isBooted by rememberMmkvBool(AppConfig.PREF_IS_BOOTED, false)
+             var delayTestUrl by rememberMmkvString(AppConfig.PREF_DELAY_TEST_URL, "")
+        -    var realPingConcurrency by rememberMmkvString(AppConfig.PREF_REAL_PING_CONCURRENCY, "16")
+        +    var realPingConcurrency by rememberMmkvString(AppConfig.PREF_REAL_PING_CONCURRENCY, "32")
+             var ipApiUrl by rememberMmkvString(AppConfig.PREF_IP_API_URL, "")
+         
+             val isVpn = mode == VPN
+        diff --git a/V2rayNG/app/src/main/res/values-fa/strings.xml b/V2rayNG/app/src/main/res/values-fa/strings.xml
+        index f357431..86fdfd0 100644
+        --- a/V2rayNG/app/src/main/res/values-fa/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values-fa/strings.xml
+        @@ -563,5 +563,6 @@
+             <string name="sub_info_open_support">باز کردن لینک پشتیبانی</string>
+             <string name="sub_info_open_page">باز کردن صفحه اطلاعات اشتراک</string>
+             <string name="sub_info_unlimited">نامحدود</string>
+        +    <string name="sub_info_ping">تست پینگ همه سرورها</string>
+         
+         </resources>
+        diff --git a/V2rayNG/app/src/main/res/values/strings.xml b/V2rayNG/app/src/main/res/values/strings.xml
+        index b2a164e..348ed5f 100644
+        --- a/V2rayNG/app/src/main/res/values/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values/strings.xml
+        @@ -564,6 +564,7 @@
+             <string name="sub_info_open_page">Open subscription page</string>
+             <string name="sub_info_traffic" translatable="false">%1$s / %2$s</string>
+             <string name="sub_info_unlimited">Unlimited</string>
+        +    <string name="sub_info_ping">Test ping of all servers</string>
+             <string name="sub_info_percent" translatable="false">%1$d%%</string>
+         
+         </resources>
+        THEDNI_PATCH
+
     - name: Rename app to THEDNI
       run: |
         find V2rayNG/app/src/main/res -name strings.xml -exec sed -i \
@@ -248,6 +395,40 @@ jobs:
         sed -i 's/"v2rayNG_/"THEDNI_/g' V2rayNG/app/build.gradle.kts
         echo "Remaining app_name values:"
         grep -rh 'name="app_name"' V2rayNG/app/src/main/res | sort | uniq -c
+
+    - name: Replace app icon with logo.png
+      run: |
+        if [ ! -f logo.png ]; then
+          echo "No logo.png in the repository root, keeping the original icon."
+          exit 0
+        fi
+        python3 -m venv "$RUNNER_TEMP/iconenv"
+        "$RUNNER_TEMP/iconenv/bin/pip" install --quiet pillow
+        "$RUNNER_TEMP/iconenv/bin/python" - <<'PY'
+        import os
+        from PIL import Image
+
+        RES = "V2rayNG/app/src/main/res"
+        DENSITY = {"mdpi": 1.0, "hdpi": 1.5, "xhdpi": 2.0, "xxhdpi": 3.0, "xxxhdpi": 4.0}
+        logo = Image.open("logo.png").convert("RGBA")
+
+        def scaled(px):
+            return logo.resize((px, px), Image.LANCZOS)
+
+        for name, scale in DENSITY.items():
+            folder = os.path.join(RES, "mipmap-" + name)
+            # Adaptive icon foreground (108dp canvas); logo.png keeps its own margin.
+            scaled(round(108 * scale)).save(os.path.join(folder, "ic_launcher_foreground.png"))
+            # Classic icons (48dp): the logo on a white background.
+            px = round(48 * scale)
+            flat = Image.new("RGBA", (px, px), (255, 255, 255, 255))
+            flat.alpha_composite(scaled(px))
+            flat.save(os.path.join(folder, "ic_launcher.png"))
+            round_path = os.path.join(folder, "ic_launcher_round.png")
+            if os.path.exists(round_path):
+                flat.save(round_path)
+        print("Launcher icons replaced with logo.png")
+        PY
 
     - name: Setup Android SDK
       uses: android-actions/setup-android@v4
