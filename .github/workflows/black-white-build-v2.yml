@@ -1,0 +1,66 @@
+name: THE DNI - Build APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platforms;android-35" \
+                    "build-tools;35.0.0" \
+                    "platform-tools"
+
+      - name: Install NDK
+        run: sdkmanager "ndk;29.0.14206865"
+
+      - name: Build HEV library
+        run: bash compile-hevtun.sh
+
+      - name: Copy native libraries
+        run: cp -r libs V2rayNG/app/
+
+      - name: Download Xray library
+        run: |
+          cd AndroidLibXrayLite
+          TAG=$(git describe --tags --abbrev=0)
+          cd ..
+          mkdir -p V2rayNG/app/libs
+          curl -fL \
+            "https://github.com/2dust/AndroidLibXrayLite/releases/download/${TAG}/libv2ray.aar" \
+            -o V2rayNG/app/libs/libv2ray.aar
+
+      - name: Build APK
+        run: |
+          cd V2rayNG
+          chmod +x gradlew
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ./gradlew assemblePlaystoreDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: THE-DNI-APK
+          path: V2rayNG/app/build/outputs/apk/playstore/debug/*.apk
+          if-no-files-found: error
