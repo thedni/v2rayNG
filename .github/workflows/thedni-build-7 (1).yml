@@ -1,0 +1,1654 @@
+name: Build THEDNI APK 7
+
+# Manual build: GitHub -> Actions -> "Build THEDNI APK 2" -> Run workflow.
+# It renames the app label from v2rayNG to THEDNI, signs with a freshly
+# generated key and uploads the APKs as a downloadable artifact.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+      with:
+        # Pinned to the v2.3.14 base that the patches below were written for.
+        ref: aa4b05503a504a3f2e43818e6ee8ebf1caaa3df0
+        submodules: 'recursive'
+        fetch-depth: '0'
+
+    - name: Add usage ring chart to subscription card
+      run: |
+        git apply --whitespace=nowarn <<'THEDNI_PATCH'
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        index dbf70a0..9638e7a 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        @@ -1,18 +1,19 @@
+         package com.v2ray.ang.ui.main
+         
+         import androidx.compose.foundation.BorderStroke
+        +import androidx.compose.foundation.Canvas
+         import androidx.compose.foundation.layout.Arrangement
+        +import androidx.compose.foundation.layout.Box
+         import androidx.compose.foundation.layout.Column
+         import androidx.compose.foundation.layout.Row
+         import androidx.compose.foundation.layout.Spacer
+        +import androidx.compose.foundation.layout.fillMaxSize
+         import androidx.compose.foundation.layout.fillMaxWidth
+        -import androidx.compose.foundation.layout.height
+         import androidx.compose.foundation.layout.padding
+         import androidx.compose.foundation.layout.size
+        -import androidx.compose.foundation.shape.RoundedCornerShape
+        +import androidx.compose.foundation.layout.width
+         import androidx.compose.material3.Icon
+         import androidx.compose.material3.IconButton
+        -import androidx.compose.material3.LinearProgressIndicator
+         import androidx.compose.material3.MaterialTheme
+         import androidx.compose.material3.Surface
+         import androidx.compose.material3.Text
+        @@ -20,7 +21,10 @@ import androidx.compose.runtime.Composable
+         import androidx.compose.runtime.remember
+         import androidx.compose.ui.Alignment
+         import androidx.compose.ui.Modifier
+        -import androidx.compose.ui.draw.clip
+        +import androidx.compose.ui.geometry.Offset
+        +import androidx.compose.ui.geometry.Size
+        +import androidx.compose.ui.graphics.StrokeCap
+        +import androidx.compose.ui.graphics.drawscope.Stroke
+         import androidx.compose.ui.res.painterResource
+         import androidx.compose.ui.res.stringResource
+         import androidx.compose.ui.semantics.clearAndSetSemantics
+        @@ -33,10 +37,14 @@ import com.v2ray.ang.dto.entities.SubscriptionUsageInfo
+         import com.v2ray.ang.extension.toTrafficString
+         import com.v2ray.ang.handler.SubscriptionInfoParser
+         import com.v2ray.ang.util.Utils
+        +import kotlin.math.roundToInt
+         
+         private const val MILLIS_PER_SECOND = 1000L
+         private const val EXPIRY_DATE_PATTERN = "yyyy-MM-dd"
+         private const val CARD_ALPHA = 0.97f
+        +private const val PERCENT_SCALE = 100
+        +private val RING_SIZE = 72.dp
+        +private val RING_STROKE = 8.dp
+         
+         /** Locale-neutral values the subscription information box renders. */
+         internal data class SubscriptionInfoUiModel(
+        @@ -54,6 +62,9 @@ internal data class SubscriptionInfoUiModel(
+         ) {
+             val trafficLow: Boolean get() = trafficFraction != null && trafficFraction >= TRAFFIC_WARNING_FRACTION
+         
+        +    /** Used share of the quota as a whole percent for the ring chart; null when unlimited. */
+        +    val percent: Int? get() = trafficFraction?.let { (it * PERCENT_SCALE).roundToInt() }
+        +
+             companion object {
+                 const val TRAFFIC_WARNING_FRACTION = 0.9f
+             }
+        @@ -136,26 +147,24 @@ internal fun SubscriptionInfoCard(
+                     }
+         
+                     // One semantics node for the read-only figures so TalkBack reads them in one go.
+        -            Column(
+        +            Row(
+                         Modifier
+                             .fillMaxWidth()
+        -                    .padding(end = 8.dp)
+        -                    .semantics(mergeDescendants = true) {}
+        +                    .padding(end = 8.dp, top = 4.dp)
+        +                    .semantics(mergeDescendants = true) {},
+        +                verticalAlignment = Alignment.CenterVertically,
+                     ) {
+        -                StatsRow(model)
+        -                model.trafficFraction?.let { fraction ->
+        -                    Spacer(Modifier.height(4.dp))
+        -                    LinearProgressIndicator(
+        -                        progress = { fraction },
+        -                        modifier = Modifier
+        -                            .fillMaxWidth()
+        -                            .height(4.dp)
+        -                            .clip(RoundedCornerShape(2.dp))
+        -                            .clearAndSetSemantics {},
+        -                        color = if (model.trafficLow) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+        -                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        +                val fraction = model.trafficFraction
+        +                val percent = model.percent
+        +                if (fraction != null && percent != null) {
+        +                    UsageRing(
+        +                        fraction = fraction,
+        +                        percentText = stringResource(R.string.sub_info_percent, percent),
+        +                        low = model.trafficLow,
+                             )
+        +                    Spacer(Modifier.width(16.dp))
+                         }
+        +                StatsColumn(model, Modifier.weight(1f))
+                     }
+                 }
+             }
+        @@ -168,24 +177,69 @@ private fun CardIconButton(iconRes: Int, contentDescription: String, onClick: ()
+             }
+         }
+         
+        +/** Circular usage chart: a track ring with the used share drawn clockwise from the top. */
+        +@Composable
+        +private fun UsageRing(
+        +    fraction: Float,
+        +    percentText: String,
+        +    low: Boolean,
+        +    modifier: Modifier = Modifier,
+        +) {
+        +    val progressColor = if (low) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+        +    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+        +    Box(modifier.size(RING_SIZE), contentAlignment = Alignment.Center) {
+        +        Canvas(Modifier.fillMaxSize().clearAndSetSemantics {}) {
+        +            val stroke = Stroke(width = RING_STROKE.toPx(), cap = StrokeCap.Round)
+        +            val inset = stroke.width / 2f
+        +            val topLeft = Offset(inset, inset)
+        +            val arcSize = Size(size.width - stroke.width, size.height - stroke.width)
+        +            drawArc(
+        +                color = trackColor,
+        +                startAngle = 0f,
+        +                sweepAngle = 360f,
+        +                useCenter = false,
+        +                topLeft = topLeft,
+        +                size = arcSize,
+        +                style = stroke,
+        +            )
+        +            if (fraction > 0f) {
+        +                drawArc(
+        +                    color = progressColor,
+        +                    startAngle = -90f,
+        +                    sweepAngle = 360f * fraction,
+        +                    useCenter = false,
+        +                    topLeft = topLeft,
+        +                    size = arcSize,
+        +                    style = stroke,
+        +                )
+        +            }
+        +        }
+        +        Text(
+        +            text = percentText,
+        +            style = MaterialTheme.typography.labelLarge,
+        +            fontWeight = FontWeight.SemiBold,
+        +            color = if (low) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        +            maxLines = 1,
+        +        )
+        +    }
+        +}
+        +
+         @Composable
+        -private fun StatsRow(model: SubscriptionInfoUiModel) {
+        +private fun StatsColumn(model: SubscriptionInfoUiModel, modifier: Modifier = Modifier) {
+             val totalText = if (model.totalBytes > 0L) {
+                 model.totalBytes.toTrafficString()
+             } else {
+                 stringResource(R.string.sub_info_unlimited)
+             }
+        -    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        +    Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                 Text(
+                     text = stringResource(R.string.sub_info_traffic, model.usedBytes.toTrafficString(), totalText),
+        -            modifier = Modifier.weight(1f, fill = false),
+        -            style = MaterialTheme.typography.bodySmall,
+        +            style = MaterialTheme.typography.bodyMedium,
+                     color = if (model.trafficLow) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                     maxLines = 1,
+                     overflow = TextOverflow.Ellipsis,
+                 )
+                 model.expireMillis?.let { expireMillis ->
+        -            Spacer(Modifier.size(8.dp))
+                     Text(
+                         text = Utils.formatTimestamp(expireMillis, EXPIRY_DATE_PATTERN),
+                         style = MaterialTheme.typography.bodySmall,
+        diff --git a/V2rayNG/app/src/main/res/values/strings.xml b/V2rayNG/app/src/main/res/values/strings.xml
+        index 37b8936..b2a164e 100644
+        --- a/V2rayNG/app/src/main/res/values/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values/strings.xml
+        @@ -564,5 +564,6 @@
+             <string name="sub_info_open_page">Open subscription page</string>
+             <string name="sub_info_traffic" translatable="false">%1$s / %2$s</string>
+             <string name="sub_info_unlimited">Unlimited</string>
+        +    <string name="sub_info_percent" translatable="false">%1$d%%</string>
+         
+         </resources>
+        diff --git a/V2rayNG/app/src/test/java/com/v2ray/ang/ui/main/MainSubscriptionInfoTest.kt b/V2rayNG/app/src/test/java/com/v2ray/ang/ui/main/MainSubscriptionInfoTest.kt
+        index 2bc061d..173b802 100644
+        --- a/V2rayNG/app/src/test/java/com/v2ray/ang/ui/main/MainSubscriptionInfoTest.kt
+        +++ b/V2rayNG/app/src/test/java/com/v2ray/ang/ui/main/MainSubscriptionInfoTest.kt
+        @@ -23,9 +23,18 @@ class MainSubscriptionInfoTest {
+                 val model = buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 5), now)
+                 assertEquals(0L, model.totalBytes)
+                 assertNull(model.trafficFraction)
+        +        assertNull(model.percent)
+                 assertFalse(model.trafficLow)
+             }
+         
+        +    @Test
+        +    fun percentIsRoundedForTheRingChart() {
+        +        assertEquals(40, buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 400, total = 1000), now).percent)
+        +        assertEquals(0, buildSubscriptionInfoUiModel(SubscriptionUsageInfo(total = 1000), now).percent)
+        +        assertEquals(34, buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 337, total = 1000), now).percent)
+        +        assertEquals(100, buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 2000, total = 1000), now).percent)
+        +    }
+        +
+             @Test
+             fun overUsageIsClampedAndFlaggedLow() {
+                 val model = buildSubscriptionInfoUiModel(SubscriptionUsageInfo(download = 2000, total = 1000), now)
+        THEDNI_PATCH
+
+    - name: Update About screen (Telegram link, footer text)
+      run: |
+        git apply --whitespace=nowarn <<'THEDNI_PATCH'
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/AppConfig.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/AppConfig.kt
+        index eead823..acb6452 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/AppConfig.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/AppConfig.kt
+        @@ -133,7 +133,7 @@ object AppConfig {
+             const val APP_WIKI_MODE = "$APP_URL/wiki/Mode"
+             const val APP_PRIVACY_POLICY = "$GITHUB_RAW_URL/2dust/v2rayNG/master/CR.md"
+             const val APP_PROMOTION_URL = "aHR0cHM6Ly85LjIzNDQ1Ni54eXovYWJjLmh0bWw="
+        -    const val TG_CHANNEL_URL = "https://t.me/github_2dust"
+        +    const val TG_CHANNEL_URL = "https://t.me/thedni"
+             const val DELAY_TEST_URL = "https://www.gstatic.com/generate_204"
+             const val DELAY_TEST_URL2 = "https://www.google.com/generate_204"
+             const val OBSERVATORY_LEAST_PING_INTERVAL = "3m"
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt
+        index 819d65e..886ea80 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt
+        @@ -63,8 +63,7 @@ fun AboutScreen(
+             val context = LocalContext.current
+             var showOssDialog by remember { mutableStateOf(false) }
+         
+        -    val libVersion = CoreNativeManager.getLibVersion()
+        -    val versionText = "v${BuildConfig.VERSION_NAME} ($libVersion)"
+        +    val versionText = "THEDNI\nRoyal Payments Inc Group"
+             val appIdText = BuildConfig.APPLICATION_ID
+         
+             Scaffold(
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Components.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Components.kt
+        index fbece27..9693409 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Components.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Components.kt
+        @@ -52,6 +52,7 @@ import androidx.compose.ui.res.painterResource
+         import androidx.compose.ui.res.stringResource
+         import androidx.compose.ui.text.TextStyle
+         import androidx.compose.ui.text.input.ImeAction
+        +import androidx.compose.ui.text.style.TextAlign
+         import androidx.compose.ui.text.style.TextOverflow
+         import androidx.compose.ui.unit.dp
+         import androidx.compose.ui.unit.sp
+        @@ -253,7 +254,11 @@ fun VersionInfoBlock(
+                     .padding(16.dp),
+                 horizontalAlignment = Alignment.CenterHorizontally
+             ) {
+        -        Text(text = versionText, style = MaterialTheme.typography.bodySmall)
+        +        Text(
+        +            text = versionText,
+        +            style = MaterialTheme.typography.bodySmall,
+        +            textAlign = TextAlign.Center
+        +        )
+                 if (appIdText != null) {
+                     Spacer(modifier = Modifier.height(4.dp))
+                     Text(text = appIdText, style = MaterialTheme.typography.bodySmall)
+        THEDNI_PATCH
+
+    - name: Add one-tap ping button to subscription card
+      run: |
+        git apply --whitespace=nowarn <<'THEDNI_PATCH'
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt
+        index af12514..96a6e38 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt
+        @@ -382,7 +382,7 @@ object SettingsManager {
+              * @return The number of concurrent real-ping tests (clamped to 1..64).
+              */
+             fun getRealPingConcurrency(): Int {
+        -        val value = MmkvManager.decodeSettingsString(AppConfig.PREF_REAL_PING_CONCURRENCY)?.toIntOrNull() ?: 16
+        +        val value = MmkvManager.decodeSettingsString(AppConfig.PREF_REAL_PING_CONCURRENCY)?.toIntOrNull() ?: 32
+                 return value.coerceIn(1, 128)
+             }
+         
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt
+        index cf40a55..e324318 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt
+        @@ -147,6 +147,7 @@ fun GroupPagerPage(
+                         fallbackTitle = groupTitle,
+                         onOpenLink = onOpenLink,
+                         onRefresh = { mainViewModel.onAction(MainAction.UpdateGroupSubscription(groupId)) },
+        +                onPing = { mainViewModel.onAction(MainAction.TestRealAllServers) },
+                         modifier = Modifier
+                             .align(Alignment.TopCenter)
+                             .onSizeChanged { infoHeightPx = it.height }
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        index 9638e7a..75cad36 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainSubscriptionInfo.kt
+        @@ -98,6 +98,7 @@ internal fun SubscriptionInfoCard(
+             fallbackTitle: String,
+             onOpenLink: (String) -> Unit,
+             onRefresh: () -> Unit,
+        +    onPing: () -> Unit,
+             modifier: Modifier = Modifier,
+         ) {
+             val model = remember(info) { buildSubscriptionInfoUiModel(info, System.currentTimeMillis()) }
+        @@ -139,6 +140,11 @@ internal fun SubscriptionInfoCard(
+                                 onClick = { onOpenLink(url) },
+                             )
+                         }
+        +                CardIconButton(
+        +                    iconRes = R.drawable.ic_flash_on_24dp,
+        +                    contentDescription = stringResource(R.string.sub_info_ping),
+        +                    onClick = onPing,
+        +                )
+                         CardIconButton(
+                             iconRes = R.drawable.ic_refresh_24dp,
+                             contentDescription = stringResource(R.string.title_sub_update),
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt
+        index a65d2fa..eeb5a0f 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt
+        @@ -178,7 +178,7 @@ fun SettingsScreen(
+         
+             var isBooted by rememberMmkvBool(AppConfig.PREF_IS_BOOTED, false)
+             var delayTestUrl by rememberMmkvString(AppConfig.PREF_DELAY_TEST_URL, "")
+        -    var realPingConcurrency by rememberMmkvString(AppConfig.PREF_REAL_PING_CONCURRENCY, "16")
+        +    var realPingConcurrency by rememberMmkvString(AppConfig.PREF_REAL_PING_CONCURRENCY, "32")
+             var ipApiUrl by rememberMmkvString(AppConfig.PREF_IP_API_URL, "")
+         
+             val isVpn = mode == VPN
+        diff --git a/V2rayNG/app/src/main/res/values-fa/strings.xml b/V2rayNG/app/src/main/res/values-fa/strings.xml
+        index f357431..86fdfd0 100644
+        --- a/V2rayNG/app/src/main/res/values-fa/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values-fa/strings.xml
+        @@ -563,5 +563,6 @@
+             <string name="sub_info_open_support">باز کردن لینک پشتیبانی</string>
+             <string name="sub_info_open_page">باز کردن صفحه اطلاعات اشتراک</string>
+             <string name="sub_info_unlimited">نامحدود</string>
+        +    <string name="sub_info_ping">تست پینگ همه سرورها</string>
+         
+         </resources>
+        diff --git a/V2rayNG/app/src/main/res/values/strings.xml b/V2rayNG/app/src/main/res/values/strings.xml
+        index b2a164e..348ed5f 100644
+        --- a/V2rayNG/app/src/main/res/values/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values/strings.xml
+        @@ -564,6 +564,7 @@
+             <string name="sub_info_open_page">Open subscription page</string>
+             <string name="sub_info_traffic" translatable="false">%1$s / %2$s</string>
+             <string name="sub_info_unlimited">Unlimited</string>
+        +    <string name="sub_info_ping">Test ping of all servers</string>
+             <string name="sub_info_percent" translatable="false">%1$d%%</string>
+         
+         </resources>
+        THEDNI_PATCH
+
+    - name: Apply champagne black theme
+      run: |
+        git apply --whitespace=nowarn <<'THEDNI_PATCH'
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Theme.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Theme.kt
+        index 64ee899..f8ccaf6 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Theme.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Theme.kt
+        @@ -65,51 +65,51 @@ private val LightColor = lightColorScheme(
+         )
+         
+         private val DarkColor = darkColorScheme(
+        -    primary = Color(0xFFC0C0C0), // Silver Gray
+        -    onPrimary = Color(0xFF303030), // Dark Gray
+        -    primaryContainer = Color(0xFF474747), // Gray
+        -    onPrimaryContainer = Color(0xFFE0E0E0), // Light Gray
+        -    secondary = Color(0xFFf97910), // Orange
+        -    onSecondary = Color(0xFF4E2600), // Dark Brown
+        -    secondaryContainer = Color(0xFF6F3800), // Brown
+        -    onSecondaryContainer = Color(0xFFFFE8D6), // Pale Orange
+        -    tertiary = Color(0xFF83D6B5), // Mint Green
+        +    primary = Color(0xFFE6D3A3), // Champagne
+        +    onPrimary = Color(0xFF1A1407), // Deep Brown
+        +    primaryContainer = Color(0xFF2A2417), // Dark Bronze
+        +    onPrimaryContainer = Color(0xFFF3E6C4), // Pale Champagne
+        +    secondary = Color(0xFFC8AA72), // Soft Gold
+        +    onSecondary = Color(0xFF1A1407), // Deep Brown
+        +    secondaryContainer = Color(0xFF2E2819), // Dark Bronze
+        +    onSecondaryContainer = Color(0xFFF0DFB6), // Pale Champagne
+        +    tertiary = Color(0xFF7FD4B2), // Mint
+             onTertiary = Color(0xFF00382E), // Dark Teal
+             tertiaryContainer = Color(0xFF005143), // Teal
+             onTertiaryContainer = Color(0xFFA0F2D0), // Light Green
+        -    error = Color(0xFFFFB4AB), // Light Red
+        +    error = Color(0xFFE27B93), // Soft Rose
+             errorContainer = Color(0xFF93000A), // Dark Red
+        -    onError = Color(0xFF690005), // Deep Red
+        +    onError = Color(0xFF3A0010), // Deep Red
+             onErrorContainer = Color(0xFFFFDAD6), // Light Red
+        -    background = Color(0xFF1C1B1F), // Near Black
+        -    onBackground = Color(0xFFE6E1E5), // Light Gray
+        -    surface = Color(0xFF1C1B1F), // Near Black
+        -    onSurface = Color(0xFFE6E1E5), // Light Gray
+        -    surfaceVariant = Color(0xFF49454F), // Dark Gray
+        -    onSurfaceVariant = Color(0xFFCAC4D0), // Light Gray
+        -    outline = Color(0xFF938F99), // Grayish Purple
+        -    outlineVariant = Color(0xFF49454F), // Dark Gray
+        -    inverseSurface = Color(0xFFE6E1E5), // Light Gray
+        -    inverseOnSurface = Color(0xFF1C1B1F), // Near Black
+        -    inversePrimary = Color(0xFF000000), // Black
+        +    background = Color(0xFF0A0A0B), // Black
+        +    onBackground = Color(0xFFECE7DC), // Ivory
+        +    surface = Color(0xFF0A0A0B), // Black
+        +    onSurface = Color(0xFFECE7DC), // Ivory
+        +    surfaceVariant = Color(0xFF1E1C18), // Dark Warm Gray
+        +    onSurfaceVariant = Color(0xFFB5AB94), // Warm Gray
+        +    outline = Color(0xFF8C8574), // Warm Gray
+        +    outlineVariant = Color(0xFF3A352A), // Dark Warm Gray
+        +    inverseSurface = Color(0xFFECE7DC), // Ivory
+        +    inverseOnSurface = Color(0xFF0A0A0B), // Black
+        +    inversePrimary = Color(0xFF7A6232), // Bronze
+             scrim = Color(0xFF000000), // Black
+        -    surfaceTint = Color(0xFFC0C0C0), // Silver Gray
+        -    surfaceContainerLowest = Color(0xFF0F0F12), // Near Black
+        -    surfaceContainerLow = Color(0xFF1A191D), // Dark Gray
+        -    surfaceContainer = Color(0xFF1E1D21), // Dark Gray
+        -    surfaceContainerHigh = Color(0xFF282729), // Dark Gray
+        -    surfaceContainerHighest = Color(0xFF333234), // Dark Gray
+        +    surfaceTint = Color(0xFFE6D3A3), // Champagne
+        +    surfaceContainerLowest = Color(0xFF060607), // Black
+        +    surfaceContainerLow = Color(0xFF111113), // Near Black
+        +    surfaceContainer = Color(0xFF151517), // Near Black
+        +    surfaceContainerHigh = Color(0xFF1B1A1B), // Dark Gray
+        +    surfaceContainerHighest = Color(0xFF242220), // Dark Warm Gray
+         )
+         
+         // Semantic Colors
+        -val colorPing = Color(0xFF009966) // Green
+        -val colorPingRed = Color(0xFFFF0099) // Pink Red
+        -val colorConfigType = Color(0xFFf97910) // Orange
+        -val colorFabActive = Color(0xFFf97910) // Orange
+        +val colorPing = Color(0xFF7FD4B2) // Mint
+        +val colorPingRed = Color(0xFFE27B93) // Soft Rose
+        +val colorConfigType = Color(0xFFC8AA72) // Soft Gold
+        +val colorFabActive = Color(0xFFE6D3A3) // Champagne
+         val colorFabInactiveLight = Color(0xFF9C9C9C) // Gray
+        -val colorFabInactiveDark = Color(0xFF646464) // Dark Gray
+        +val colorFabInactiveDark = Color(0xFF5A564C) // Warm Dark Gray
+         val dividerColorLight = Color(0xFFE0E0E0) // Light Gray
+        -val dividerColorDark = Color(0xFF424242) // Dark Gray
+        +val dividerColorDark = Color(0xFF2A2720) // Dark Warm Gray
+         
+         // Toast Colors 85%
+         val toastNormalBgLight = Color(0xD9353A3E) // Dark Gray
+        @@ -152,11 +152,8 @@ object ThemeManager {
+         @Composable
+         fun resolveDarkTheme(): Boolean {
+             val mode by ThemeManager.themeMode.collectAsState()
+        -    return when (mode) {
+        -        "1" -> false
+        -        "2" -> true
+        -        else -> isSystemInDarkTheme()
+        -    }
+        +    // THEDNI: the champagne black theme is always dark, regardless of mode.
+        +    return true
+         }
+         
+         val LocalDarkTheme = compositionLocalOf { false }
+        @@ -168,14 +165,8 @@ fun AppTheme(
+         ) {
+             val dynamicColor by ThemeManager.dynamicColorEnabled.collectAsState()
+             val context = LocalContext.current
+        -    val colorScheme = when {
+        -        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+        -            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        -        }
+        -
+        -        darkTheme -> DarkColor
+        -        else -> LightColor
+        -    }
+        +    // THEDNI: fixed champagne scheme, dynamic color is not used.
+        +    val colorScheme = DarkColor
+             val snackbarController = rememberAppSnackbarController()
+         
+             val view = LocalView.current
+        diff --git a/V2rayNG/app/src/main/res/values/themes.xml b/V2rayNG/app/src/main/res/values/themes.xml
+        index 7d103fc..99642da 100644
+        --- a/V2rayNG/app/src/main/res/values/themes.xml
+        +++ b/V2rayNG/app/src/main/res/values/themes.xml
+        @@ -1,11 +1,11 @@
+         <resources>
+        -    <color name="window_background_light">#FFFFFFFF</color>
+        -    <color name="window_background_dark">#FF1C1B1F</color>
+        +    <color name="window_background_light">#FF0A0A0B</color>
+        +    <color name="window_background_dark">#FF0A0A0B</color>
+         
+             <style name="AppThemeBaseCommon" parent="Theme.AppCompat.DayNight.NoActionBar">
+                 <item name="android:statusBarColor">@android:color/transparent</item>
+                 <item name="android:navigationBarColor">@android:color/transparent</item>
+        -        <item name="android:windowLightStatusBar">true</item>
+        +        <item name="android:windowLightStatusBar">false</item>
+                 <item name="android:windowBackground">@color/window_background_light</item>
+             </style>
+         
+        THEDNI_PATCH
+
+    - name: Simplify About menu (Support Us)
+      run: |
+        git apply --whitespace=nowarn <<'THEDNI_PATCH'
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt
+        index 886ea80..a0f23df 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/AboutActivity.kt
+        @@ -81,29 +81,9 @@ fun AboutScreen(
+                         .padding(innerPadding)
+                         .verticalScroll(rememberScrollState())
+                 ) {
+        -            SettingsMenuItem(
+        -                icon = painterResource(R.drawable.ic_source_code_24dp),
+        -                title = stringResource(R.string.title_source_code),
+        -                onClick = { Utils.openUri(context, AppConfig.APP_URL) }
+        -            )
+        -            SettingsMenuItem(
+        -                icon = painterResource(R.drawable.license_24px),
+        -                title = stringResource(R.string.title_oss_license),
+        -                onClick = { showOssDialog = true }
+        -            )
+        -            SettingsMenuItem(
+        -                icon = painterResource(R.drawable.ic_translate_24dp),
+        -                title = stringResource(R.string.title_translators),
+        -                onClick = onTranslatorsClick
+        -            )
+        -            SettingsMenuItem(
+        -                icon = painterResource(R.drawable.ic_feedback_24dp),
+        -                title = stringResource(R.string.title_pref_feedback),
+        -                onClick = { Utils.openUri(context, AppConfig.APP_ISSUES_URL) }
+        -            )
+                     SettingsMenuItem(
+                         icon = painterResource(R.drawable.ic_telegram_24dp),
+        -                title = stringResource(R.string.title_tg_channel),
+        +                title = stringResource(R.string.title_support_us),
+                         onClick = { Utils.openUri(context, AppConfig.TG_CHANNEL_URL) }
+                     )
+                     SettingsMenuItem(
+        diff --git a/V2rayNG/app/src/main/res/values-fa/strings.xml b/V2rayNG/app/src/main/res/values-fa/strings.xml
+        index 86fdfd0..4a4c5df 100644
+        --- a/V2rayNG/app/src/main/res/values-fa/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values-fa/strings.xml
+        @@ -292,6 +292,7 @@
+             <string name="title_oss_license">مجوز های منبع باز</string>
+             <string name="title_translators">مترجمان</string>
+             <string name="title_tg_channel">کانال تلگرام</string>
+        +    <string name="title_support_us">حمایت از ما</string>
+         
+             <string name="title_pref_promotion">تبلیغات</string>
+         
+        diff --git a/V2rayNG/app/src/main/res/values/strings.xml b/V2rayNG/app/src/main/res/values/strings.xml
+        index 348ed5f..7498f45 100644
+        --- a/V2rayNG/app/src/main/res/values/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values/strings.xml
+        @@ -292,6 +292,7 @@
+             <string name="title_oss_license">Open-source licenses</string>
+             <string name="title_translators">Translators</string>
+             <string name="title_tg_channel">Telegram channel</string>
+        +    <string name="title_support_us">Support Us</string>
+         
+             <string name="title_pref_promotion">Promotion</string>
+         
+        THEDNI_PATCH
+
+    - name: Apply neon pink design and bottom navigation
+      run: |
+        git apply --whitespace=nowarn <<'THEDNI_PATCH'
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Theme.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Theme.kt
+        index f8ccaf6..e2a40dd 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Theme.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/compose/Theme.kt
+        @@ -65,51 +65,51 @@ private val LightColor = lightColorScheme(
+         )
+         
+         private val DarkColor = darkColorScheme(
+        -    primary = Color(0xFFE6D3A3), // Champagne
+        -    onPrimary = Color(0xFF1A1407), // Deep Brown
+        -    primaryContainer = Color(0xFF2A2417), // Dark Bronze
+        -    onPrimaryContainer = Color(0xFFF3E6C4), // Pale Champagne
+        -    secondary = Color(0xFFC8AA72), // Soft Gold
+        -    onSecondary = Color(0xFF1A1407), // Deep Brown
+        -    secondaryContainer = Color(0xFF2E2819), // Dark Bronze
+        -    onSecondaryContainer = Color(0xFFF0DFB6), // Pale Champagne
+        -    tertiary = Color(0xFF7FD4B2), // Mint
+        -    onTertiary = Color(0xFF00382E), // Dark Teal
+        +    primary = Color(0xFFFF2E88), // Neon Pink
+        +    onPrimary = Color(0xFFFFFFFF), // White
+        +    primaryContainer = Color(0xFF3A0B24), // Dark Magenta
+        +    onPrimaryContainer = Color(0xFFFFD9E6), // Pale Pink
+        +    secondary = Color(0xFFFF6FAE), // Soft Pink
+        +    onSecondary = Color(0xFF2A0016), // Deep Magenta
+        +    secondaryContainer = Color(0xFF2E1020), // Dark Plum
+        +    onSecondaryContainer = Color(0xFFFFD9E6), // Pale Pink
+        +    tertiary = Color(0xFF22D66B), // Green
+        +    onTertiary = Color(0xFF00210E), // Dark Green
+             tertiaryContainer = Color(0xFF005143), // Teal
+             onTertiaryContainer = Color(0xFFA0F2D0), // Light Green
+        -    error = Color(0xFFE27B93), // Soft Rose
+        +    error = Color(0xFFFF4D6D), // Red Pink
+             errorContainer = Color(0xFF93000A), // Dark Red
+             onError = Color(0xFF3A0010), // Deep Red
+             onErrorContainer = Color(0xFFFFDAD6), // Light Red
+        -    background = Color(0xFF0A0A0B), // Black
+        -    onBackground = Color(0xFFECE7DC), // Ivory
+        -    surface = Color(0xFF0A0A0B), // Black
+        -    onSurface = Color(0xFFECE7DC), // Ivory
+        -    surfaceVariant = Color(0xFF1E1C18), // Dark Warm Gray
+        -    onSurfaceVariant = Color(0xFFB5AB94), // Warm Gray
+        -    outline = Color(0xFF8C8574), // Warm Gray
+        -    outlineVariant = Color(0xFF3A352A), // Dark Warm Gray
+        -    inverseSurface = Color(0xFFECE7DC), // Ivory
+        -    inverseOnSurface = Color(0xFF0A0A0B), // Black
+        -    inversePrimary = Color(0xFF7A6232), // Bronze
+        +    background = Color(0xFF07040A), // Black
+        +    onBackground = Color(0xFFF4ECF1), // Near White
+        +    surface = Color(0xFF07040A), // Black
+        +    onSurface = Color(0xFFF4ECF1), // Near White
+        +    surfaceVariant = Color(0xFF1D1219), // Dark Plum
+        +    onSurfaceVariant = Color(0xFFC9B7C1), // Muted Pink Gray
+        +    outline = Color(0xFF8A7482), // Muted Pink Gray
+        +    outlineVariant = Color(0xFF3A2431), // Dark Plum
+        +    inverseSurface = Color(0xFFF4ECF1), // Near White
+        +    inverseOnSurface = Color(0xFF07040A), // Black
+        +    inversePrimary = Color(0xFFB0124F), // Deep Pink
+             scrim = Color(0xFF000000), // Black
+        -    surfaceTint = Color(0xFFE6D3A3), // Champagne
+        -    surfaceContainerLowest = Color(0xFF060607), // Black
+        -    surfaceContainerLow = Color(0xFF111113), // Near Black
+        -    surfaceContainer = Color(0xFF151517), // Near Black
+        -    surfaceContainerHigh = Color(0xFF1B1A1B), // Dark Gray
+        -    surfaceContainerHighest = Color(0xFF242220), // Dark Warm Gray
+        +    surfaceTint = Color(0xFFFF2E88), // Neon Pink
+        +    surfaceContainerLowest = Color(0xFF050307), // Black
+        +    surfaceContainerLow = Color(0xFF0E080D), // Near Black
+        +    surfaceContainer = Color(0xFF140C12), // Near Black
+        +    surfaceContainerHigh = Color(0xFF1B1118), // Dark Plum
+        +    surfaceContainerHighest = Color(0xFF24161F), // Dark Plum
+         )
+         
+         // Semantic Colors
+        -val colorPing = Color(0xFF7FD4B2) // Mint
+        -val colorPingRed = Color(0xFFE27B93) // Soft Rose
+        -val colorConfigType = Color(0xFFC8AA72) // Soft Gold
+        -val colorFabActive = Color(0xFFE6D3A3) // Champagne
+        +val colorPing = Color(0xFF22D66B) // Green
+        +val colorPingRed = Color(0xFFFF4D6D) // Red Pink
+        +val colorConfigType = Color(0xFFFF6FAE) // Soft Pink
+        +val colorFabActive = Color(0xFFFF2E88) // Neon Pink
+         val colorFabInactiveLight = Color(0xFF9C9C9C) // Gray
+        -val colorFabInactiveDark = Color(0xFF5A564C) // Warm Dark Gray
+        +val colorFabInactiveDark = Color(0xFF5A4650) // Muted Plum
+         val dividerColorLight = Color(0xFFE0E0E0) // Light Gray
+        -val dividerColorDark = Color(0xFF2A2720) // Dark Warm Gray
+        +val dividerColorDark = Color(0xFF2A1A24) // Dark Plum
+         
+         // Toast Colors 85%
+         val toastNormalBgLight = Color(0xD9353A3E) // Dark Gray
+        @@ -152,7 +152,7 @@ object ThemeManager {
+         @Composable
+         fun resolveDarkTheme(): Boolean {
+             val mode by ThemeManager.themeMode.collectAsState()
+        -    // THEDNI: the champagne black theme is always dark, regardless of mode.
+        +    // THEDNI: the neon pink black theme is always dark, regardless of mode.
+             return true
+         }
+         
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/CountryMap.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/CountryMap.kt
+        new file mode 100644
+        index 0000000..dbda001
+        --- /dev/null
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/CountryMap.kt
+        @@ -0,0 +1,110 @@
+        +package com.v2ray.ang.ui.main
+        +
+        +/** Approximate location of a country on the hero map (equirectangular, degrees). */
+        +internal class CountryPoint(
+        +    val code: String,
+        +    val lat: Float,
+        +    val lon: Float,
+        +    val radius: Float,
+        +    val keywords: List<String>,
+        +) {
+        +    /** Normalised map position, shared with the world dot map (lon -170..180, lat 75..-55). */
+        +    val nx: Float get() = (lon + 170f) / 350f
+        +    val ny: Float get() = (75f - lat) / 130f
+        +}
+        +
+        +private fun c(code: String, lat: Float, lon: Float, radius: Float, vararg keywords: String) =
+        +    CountryPoint(code, lat, lon, radius, keywords.toList())
+        +
+        +private val countries = listOf(
+        +    c("US", 39f, -98f, 17f, "united states", "usa", "america", "آمریکا", "امریکا"),
+        +    c("CA", 56f, -100f, 18f, "canada", "کانادا"),
+        +    c("MX", 23f, -102f, 9f, "mexico", "مکزیک"),
+        +    c("BR", -10f, -52f, 16f, "brazil", "brasil", "برزیل"),
+        +    c("AR", -36f, -65f, 10f, "argentina", "آرژانتین"),
+        +    c("CL", -33f, -71f, 6f, "chile", "شیلی"),
+        +    c("CO", 4f, -73f, 6f, "colombia", "کلمبیا"),
+        +    c("GB", 54f, -2f, 5f, "united kingdom", "england", "britain", "london", "انگلیس", "بریتانیا"),
+        +    c("IE", 53f, -8f, 3f, "ireland", "ایرلند"),
+        +    c("DE", 51f, 10f, 5f, "germany", "deutsch", "آلمان"),
+        +    c("FR", 46.5f, 2.5f, 6f, "france", "فرانسه"),
+        +    c("NL", 52.2f, 5.5f, 2.5f, "netherlands", "holland", "هلند"),
+        +    c("BE", 50.6f, 4.6f, 2f, "belgium", "بلژیک"),
+        +    c("CH", 46.8f, 8.2f, 2.5f, "switzerland", "سوئیس"),
+        +    c("AT", 47.5f, 14.5f, 3f, "austria", "اتریش"),
+        +    c("IT", 42.5f, 12.5f, 5.5f, "italy", "ایتالیا"),
+        +    c("ES", 40f, -3.5f, 6f, "spain", "اسپانیا"),
+        +    c("PT", 39.5f, -8f, 3f, "portugal", "پرتغال"),
+        +    c("SE", 62f, 15f, 7f, "sweden", "سوئد"),
+        +    c("NO", 62f, 9f, 7f, "norway", "نروژ"),
+        +    c("FI", 63.5f, 26f, 6f, "finland", "فنلاند"),
+        +    c("DK", 56f, 10f, 3f, "denmark", "دانمارک"),
+        +    c("PL", 52f, 19f, 5f, "poland", "لهستان"),
+        +    c("CZ", 49.8f, 15.5f, 3f, "czech", "چک"),
+        +    c("RO", 45.9f, 25f, 4f, "romania", "رومانی"),
+        +    c("BG", 42.7f, 25.5f, 3f, "bulgaria", "بلغارستان"),
+        +    c("UA", 49f, 32f, 6f, "ukraine", "اوکراین"),
+        +    c("RU", 60f, 90f, 24f, "russia", "روسیه"),
+        +    c("TR", 39f, 35f, 6f, "turkey", "türkiye", "turkiye", "istanbul", "ترکیه"),
+        +    c("GE", 42f, 43.5f, 2.5f, "georgia", "گرجستان"),
+        +    c("AM", 40.2f, 45f, 2f, "armenia", "ارمنستان"),
+        +    c("AZ", 40.3f, 47.5f, 2.5f, "azerbaijan", "آذربایجان"),
+        +    c("IR", 32.5f, 54f, 9f, "iran", "ایران"),
+        +    c("IQ", 33f, 44f, 5f, "iraq", "عراق"),
+        +    c("AE", 24f, 54f, 3f, "emirates", "dubai", "امارات", "دبی"),
+        +    c("SA", 24f, 45f, 9f, "saudi", "عربستان"),
+        +    c("IL", 31.5f, 35f, 2f, "israel", "اسرائیل"),
+        +    c("EG", 26.5f, 30f, 6f, "egypt", "مصر"),
+        +    c("ZA", -29f, 24f, 8f, "south africa", "آفریقای جنوبی"),
+        +    c("NG", 9f, 8f, 6f, "nigeria", "نیجریه"),
+        +    c("KZ", 48f, 67f, 12f, "kazakhstan", "قزاقستان"),
+        +    c("IN", 22f, 79f, 10f, "india", "هند"),
+        +    c("PK", 30f, 70f, 6f, "pakistan", "پاکستان"),
+        +    c("CN", 35f, 103f, 17f, "china", "چین"),
+        +    c("HK", 22.3f, 114.2f, 2f, "hong kong", "hongkong", "هنگ کنگ"),
+        +    c("TW", 23.7f, 121f, 2.5f, "taiwan", "تایوان"),
+        +    c("JP", 36f, 138f, 7f, "japan", "tokyo", "ژاپن"),
+        +    c("KR", 36.5f, 128f, 3.5f, "korea", "seoul", "کره"),
+        +    c("SG", 1.35f, 103.8f, 2f, "singapore", "سنگاپور"),
+        +    c("MY", 4f, 109f, 5f, "malaysia", "مالزی"),
+        +    c("TH", 15f, 101f, 5f, "thailand", "تایلند"),
+        +    c("VN", 16f, 107f, 5f, "vietnam", "ویتنام"),
+        +    c("ID", -2f, 117f, 11f, "indonesia", "اندونزی"),
+        +    c("PH", 12f, 122f, 5f, "philippines", "فیلیپین"),
+        +    c("AU", -25f, 134f, 14f, "australia", "استرالیا"),
+        +    c("NZ", -41f, 173f, 5f, "new zealand", "نیوزیلند"),
+        +)
+        +
+        +private val byCode = countries.associateBy { it.code }
+        +
+        +/**
+        + * Guesses the country of a server from its name: a flag emoji first, then a known country
+        + * word (English or Persian), then a standalone upper-case ISO code such as "US" or "DE".
+        + */
+        +internal fun detectCountry(name: String): CountryPoint? {
+        +    if (name.isBlank()) return null
+        +
+        +    val points = ArrayList<Int>()
+        +    var at = 0
+        +    while (at < name.length) {
+        +        val cp = name.codePointAt(at)
+        +        points.add(cp)
+        +        at += Character.charCount(cp)
+        +    }
+        +    for (i in 0 until points.size - 1) {
+        +        val a = points[i] - 0x1F1E6
+        +        val b = points[i + 1] - 0x1F1E6
+        +        if (a in 0..25 && b in 0..25) {
+        +            byCode["" + ('A' + a) + ('A' + b)]?.let { return it }
+        +        }
+        +    }
+        +
+        +    val lower = name.lowercase()
+        +    countries.firstOrNull { country -> country.keywords.any { lower.contains(it) } }?.let { return it }
+        +
+        +    Regex("(?<![A-Za-z])[A-Z]{2}(?![A-Za-z])").findAll(name).forEach { match ->
+        +        val code = if (match.value == "UK") "GB" else match.value
+        +        byCode[code]?.let { return it }
+        +    }
+        +    return null
+        +}
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainHero.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainHero.kt
+        new file mode 100644
+        index 0000000..de45fe3
+        --- /dev/null
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainHero.kt
+        @@ -0,0 +1,356 @@
+        +package com.v2ray.ang.ui.main
+        +
+        +import androidx.compose.animation.core.RepeatMode
+        +import androidx.compose.animation.core.animateFloatAsState
+        +import androidx.compose.animation.core.animateFloat
+        +import androidx.compose.animation.core.infiniteRepeatable
+        +import androidx.compose.animation.core.rememberInfiniteTransition
+        +import androidx.compose.animation.core.tween
+        +import androidx.compose.foundation.Canvas
+        +import androidx.compose.foundation.background
+        +import androidx.compose.foundation.border
+        +import androidx.compose.foundation.clickable
+        +import androidx.compose.foundation.layout.Arrangement
+        +import androidx.compose.foundation.layout.Box
+        +import androidx.compose.foundation.layout.Column
+        +import androidx.compose.foundation.layout.Row
+        +import androidx.compose.foundation.layout.RowScope
+        +import androidx.compose.foundation.layout.Spacer
+        +import androidx.compose.foundation.layout.WindowInsets
+        +import androidx.compose.foundation.layout.fillMaxHeight
+        +import androidx.compose.foundation.layout.fillMaxWidth
+        +import androidx.compose.foundation.layout.height
+        +import androidx.compose.foundation.layout.navigationBars
+        +import androidx.compose.foundation.layout.padding
+        +import androidx.compose.foundation.layout.size
+        +import androidx.compose.foundation.layout.width
+        +import androidx.compose.foundation.layout.windowInsetsPadding
+        +import androidx.compose.foundation.selection.selectable
+        +import androidx.compose.foundation.shape.CircleShape
+        +import androidx.compose.foundation.shape.RoundedCornerShape
+        +import androidx.compose.material3.Icon
+        +import androidx.compose.material3.IconButton
+        +import androidx.compose.material3.MaterialTheme
+        +import androidx.compose.material3.Text
+        +import androidx.compose.runtime.Composable
+        +import androidx.compose.runtime.getValue
+        +import androidx.compose.runtime.remember
+        +import androidx.compose.ui.Alignment
+        +import androidx.compose.ui.Modifier
+        +import androidx.compose.ui.draw.clip
+        +import androidx.compose.ui.draw.clipToBounds
+        +import androidx.compose.ui.geometry.Offset
+        +import androidx.compose.ui.graphics.Brush
+        +import androidx.compose.ui.graphics.Color
+        +import androidx.compose.ui.graphics.drawscope.DrawScope
+        +import androidx.compose.ui.res.painterResource
+        +import androidx.compose.ui.res.stringResource
+        +import androidx.compose.ui.semantics.contentDescription
+        +import androidx.compose.ui.semantics.semantics
+        +import androidx.compose.ui.semantics.Role
+        +import androidx.compose.ui.text.font.FontWeight
+        +import androidx.compose.ui.text.style.TextAlign
+        +import androidx.compose.ui.text.style.TextOverflow
+        +import androidx.compose.ui.unit.dp
+        +import androidx.compose.ui.unit.sp
+        +import com.v2ray.ang.R
+        +import com.v2ray.ang.ui.compose.AppDivider
+        +import com.v2ray.ang.ui.compose.colorPing
+        +import com.v2ray.ang.ui.compose.colorPingRed
+        +
+        +// Rough continent blobs (centre and radii in map space, 0..1) used to draw the dotted world map.
+        +private class MapBlob(val cx: Float, val cy: Float, val rx: Float, val ry: Float)
+        +
+        +private val mapBlobs = listOf(
+        +    MapBlob(0.20f, 0.22f, 0.10f, 0.17f),
+        +    MapBlob(0.20f, 0.41f, 0.04f, 0.08f),
+        +    MapBlob(0.31f, 0.69f, 0.05f, 0.21f),
+        +    MapBlob(0.53f, 0.19f, 0.07f, 0.11f),
+        +    MapBlob(0.54f, 0.54f, 0.08f, 0.25f),
+        +    MapBlob(0.73f, 0.23f, 0.19f, 0.19f),
+        +    MapBlob(0.76f, 0.46f, 0.10f, 0.10f),
+        +    MapBlob(0.61f, 0.39f, 0.04f, 0.07f),
+        +    MapBlob(0.87f, 0.77f, 0.07f, 0.09f),
+        +)
+        +
+        +private const val MAP_COLS = 140
+        +private const val MAP_ROWS = 76
+        +
+        +private val worldDots: List<Offset> = buildList {
+        +    for (r in 0 until MAP_ROWS) {
+        +        for (c in 0 until MAP_COLS) {
+        +            val nx = (c + 0.5f) / MAP_COLS
+        +            val ny = (r + 0.5f) / MAP_ROWS
+        +            val inside = mapBlobs.any { b ->
+        +                val dx = (nx - b.cx) / b.rx
+        +                val dy = (ny - b.cy) / b.ry
+        +                dx * dx + dy * dy <= 1f
+        +            }
+        +            if (inside) add(Offset(nx, ny))
+        +        }
+        +    }
+        +}
+        +
+        +private fun DrawScope.drawWorld(
+        +    color: Color,
+        +    zoom: Float,
+        +    fx: Float,
+        +    fy: Float,
+        +    country: CountryPoint?,
+        +    highlight: Float
+        +) {
+        +    val w = size.width
+        +    val h = size.height
+        +    val radius = 1.2.dp.toPx() * kotlin.math.sqrt(zoom)
+        +    for (p in worldDots) {
+        +        val sx = ((p.x - fx) * zoom + 0.5f) * w
+        +        val sy = ((p.y - fy) * zoom + 0.5f) * h
+        +        if (sx < 0f || sx > w || sy < 0f || sy > h) continue
+        +        drawCircle(color = color.copy(alpha = 0.28f), radius = radius, center = Offset(sx, sy))
+        +    }
+        +    if (country != null && highlight > 0f) {
+        +        // Country area: a disc of bright dots around its centre (approximate, not the real border).
+        +        val step = 1.7f
+        +        var dLat = -country.radius
+        +        while (dLat <= country.radius) {
+        +            var dLon = -country.radius
+        +            while (dLon <= country.radius) {
+        +                if (dLat * dLat + dLon * dLon <= country.radius * country.radius) {
+        +                    val nx = (country.lon + dLon + 170f) / 350f
+        +                    val ny = (75f - (country.lat + dLat)) / 130f
+        +                    val sx = ((nx - fx) * zoom + 0.5f) * w
+        +                    val sy = ((ny - fy) * zoom + 0.5f) * h
+        +                    if (sx in 0f..w && sy in 0f..h) {
+        +                        drawCircle(
+        +                            color = color.copy(alpha = 0.9f * highlight),
+        +                            radius = radius * 1.25f,
+        +                            center = Offset(sx, sy)
+        +                        )
+        +                    }
+        +                }
+        +                dLon += step
+        +            }
+        +            dLat += step
+        +        }
+        +    }
+        +}
+        +
+        +/** Number of lit bars (0..3) for a measured delay; 0 means failed or untested. */
+        +internal fun pingLevel(delayMillis: Long): Int = when {
+        +    delayMillis <= 0L -> 0
+        +    delayMillis < 300L -> 3
+        +    delayMillis < 800L -> 2
+        +    else -> 1
+        +}
+        +
+        +@Composable
+        +internal fun SignalBars(level: Int, color: Color, modifier: Modifier = Modifier) {
+        +    val off = MaterialTheme.colorScheme.outlineVariant
+        +    Row(
+        +        modifier = modifier,
+        +        verticalAlignment = Alignment.Bottom,
+        +        horizontalArrangement = Arrangement.spacedBy(2.dp)
+        +    ) {
+        +        for (i in 0 until 3) {
+        +            Box(
+        +                Modifier
+        +                    .width(4.dp)
+        +                    .height((7 + i * 5).dp)
+        +                    .clip(RoundedCornerShape(1.5.dp))
+        +                    .background(if (i < level) color else off)
+        +            )
+        +        }
+        +    }
+        +}
+        +
+        +@Composable
+        +fun ConnectHero(
+        +    isRunning: Boolean,
+        +    displayText: String,
+        +    serverName: String,
+        +    onToggle: () -> Unit,
+        +    onTest: () -> Unit,
+        +    modifier: Modifier = Modifier
+        +) {
+        +    val country = remember(serverName) { detectCountry(serverName) }
+        +    val zoom by animateFloatAsState(if (country != null) 2.3f else 1f, tween(700), label = "map-zoom")
+        +    val focusX by animateFloatAsState(country?.nx ?: 0.5f, tween(700), label = "map-fx")
+        +    val focusY by animateFloatAsState(country?.ny ?: 0.5f, tween(700), label = "map-fy")
+        +    val highlight by animateFloatAsState(if (country != null) 1f else 0f, tween(600), label = "map-hi")
+        +    val primary = MaterialTheme.colorScheme.primary
+        +    val secondary = MaterialTheme.colorScheme.secondary
+        +    val transition = rememberInfiniteTransition(label = "hero-glow")
+        +    val pulse = transition.animateFloat(
+        +        initialValue = 0.45f,
+        +        targetValue = 1f,
+        +        animationSpec = infiniteRepeatable(tween(1600), RepeatMode.Reverse),
+        +        label = "hero-pulse"
+        +    )
+        +    val toggleLabel = stringResource(if (isRunning) R.string.acc_stop else R.string.acc_start)
+        +    val tapText = stringResource(if (isRunning) R.string.connect_tap_off else R.string.connect_tap_on)
+        +
+        +    Column(
+        +        modifier = modifier
+        +            .fillMaxWidth()
+        +            .padding(horizontal = 16.dp),
+        +        horizontalAlignment = Alignment.CenterHorizontally
+        +    ) {
+        +        Box(
+        +            modifier = Modifier
+        +                .fillMaxWidth()
+        +                .height(190.dp),
+        +            contentAlignment = Alignment.Center
+        +        ) {
+        +            Canvas(Modifier.fillMaxWidth().height(190.dp).clipToBounds()) {
+        +                drawWorld(primary, zoom, focusX, focusY, country, highlight)
+        +            }
+        +            Canvas(Modifier.fillMaxWidth().height(190.dp).clipToBounds()) {
+        +                if (country != null) {
+        +                    val sx = ((country.nx - focusX) * zoom + 0.5f) * size.width
+        +                    val sy = ((country.ny - focusY) * zoom + 0.5f) * size.height
+        +                    val r = (10.dp.toPx() + 8.dp.toPx() * pulse.value)
+        +                    drawCircle(color = primary.copy(alpha = 0.35f * (1f - pulse.value * 0.5f)), radius = r, center = Offset(sx, sy))
+        +                    drawCircle(color = primary, radius = 3.dp.toPx(), center = Offset(sx, sy))
+        +                }
+        +            }
+        +            Canvas(Modifier.size(190.dp)) {
+        +                val glow = if (isRunning) pulse.value else 0.4f
+        +                drawCircle(
+        +                    brush = Brush.radialGradient(
+        +                        colors = listOf(primary.copy(alpha = 0.40f * glow), Color.Transparent),
+        +                        center = center,
+        +                        radius = size.minDimension / 2f
+        +                    ),
+        +                    radius = size.minDimension / 2f
+        +                )
+        +            }
+        +            Box(
+        +                modifier = Modifier
+        +                    .size(132.dp)
+        +                    .clip(CircleShape)
+        +                    .background(Color(0xFF0B0609))
+        +                    .border(
+        +                        width = 4.dp,
+        +                        brush = Brush.linearGradient(listOf(primary, secondary, primary)),
+        +                        shape = CircleShape
+        +                    )
+        +                    .clickable(role = Role.Button, onClick = onToggle)
+        +                    .semantics { contentDescription = toggleLabel },
+        +                contentAlignment = Alignment.Center
+        +            ) {
+        +                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        +                    Icon(
+        +                        painter = painterResource(R.drawable.ic_power_24dp),
+        +                        contentDescription = null,
+        +                        tint = if (isRunning) primary else Color.White,
+        +                        modifier = Modifier.size(44.dp)
+        +                    )
+        +                    Spacer(Modifier.height(6.dp))
+        +                    Text(
+        +                        text = tapText,
+        +                        style = MaterialTheme.typography.labelMedium,
+        +                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        +                        textAlign = TextAlign.Center
+        +                    )
+        +                }
+        +            }
+        +        }
+        +
+        +        Spacer(Modifier.height(10.dp))
+        +
+        +        Row(
+        +            modifier = Modifier
+        +                .fillMaxWidth()
+        +                .clip(RoundedCornerShape(24.dp))
+        +                .background(MaterialTheme.colorScheme.surfaceContainer)
+        +                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(24.dp))
+        +                .padding(start = 18.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        +            verticalAlignment = Alignment.CenterVertically
+        +        ) {
+        +            SignalBars(
+        +                level = if (isRunning) 3 else 1,
+        +                color = if (isRunning) primary else MaterialTheme.colorScheme.onSurfaceVariant
+        +            )
+        +            Spacer(Modifier.width(14.dp))
+        +            Text(
+        +                text = displayText,
+        +                modifier = Modifier.weight(1f),
+        +                style = MaterialTheme.typography.bodyMedium,
+        +                fontWeight = FontWeight.SemiBold,
+        +                maxLines = 2,
+        +                overflow = TextOverflow.Ellipsis
+        +            )
+        +            IconButton(onClick = onTest) {
+        +                Icon(
+        +                    painter = painterResource(R.drawable.ic_flash_on_24dp),
+        +                    contentDescription = stringResource(R.string.connection_test_testing),
+        +                    tint = primary
+        +                )
+        +            }
+        +        }
+        +    }
+        +}
+        +
+        +@Composable
+        +fun MainNavBar(onNavigate: (MainDestination) -> Unit) {
+        +    Column(
+        +        modifier = Modifier
+        +            .fillMaxWidth()
+        +            .background(MaterialTheme.colorScheme.surfaceContainerLowest)
+        +            .windowInsetsPadding(WindowInsets.navigationBars)
+        +    ) {
+        +        AppDivider()
+        +        Row(
+        +            modifier = Modifier
+        +                .fillMaxWidth()
+        +                .height(62.dp)
+        +        ) {
+        +            NavItem(R.drawable.ic_home_24dp, R.string.nav_home, true) {}
+        +            NavItem(R.drawable.ic_logcat_24dp, R.string.title_logcat, false) {
+        +                onNavigate(MainDestination.Logcat)
+        +            }
+        +            NavItem(R.drawable.ic_settings_24dp, R.string.title_settings, false) {
+        +                onNavigate(MainDestination.Settings)
+        +            }
+        +        }
+        +    }
+        +}
+        +
+        +@Composable
+        +private fun RowScope.NavItem(
+        +    iconRes: Int,
+        +    labelRes: Int,
+        +    selected: Boolean,
+        +    onClick: () -> Unit
+        +) {
+        +    val tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+        +    Column(
+        +        modifier = Modifier
+        +            .weight(1f)
+        +            .fillMaxHeight()
+        +            .selectable(selected = selected, role = Role.Tab, onClick = onClick),
+        +        horizontalAlignment = Alignment.CenterHorizontally,
+        +        verticalArrangement = Arrangement.Center
+        +    ) {
+        +        Icon(
+        +            painter = painterResource(iconRes),
+        +            contentDescription = null,
+        +            tint = tint,
+        +            modifier = Modifier.size(24.dp)
+        +        )
+        +        Text(
+        +            text = stringResource(labelRes),
+        +            color = tint,
+        +            fontSize = 12.sp,
+        +            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+        +        )
+        +        Spacer(Modifier.height(4.dp))
+        +        Box(
+        +            Modifier
+        +                .width(44.dp)
+        +                .height(3.dp)
+        +                .clip(RoundedCornerShape(2.dp))
+        +                .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent)
+        +        )
+        +    }
+        +}
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainScreen.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainScreen.kt
+        index f29539d..368e750 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainScreen.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainScreen.kt
+        @@ -47,6 +47,7 @@ fun MainScreen(
+             val displayText = mainViewModel.formatStatus(uiState.status)
+             val selectedGuid = uiState.selectedGuid
+             val doubleColumnDisplay = uiState.doubleColumnDisplay
+        +    val serverName = remember(selectedGuid, groups) { mainViewModel.selectedServerRemarks(selectedGuid) }
+             val confirmRemove = uiState.confirmRemove
+             val shareQRCodeBitmap = uiState.shareQRCodeBitmap
+         
+        @@ -185,12 +186,7 @@ fun MainScreen(
+                         )
+                     },
+                     bottomBar = {
+        -                MainBottomBar(
+        -                    displayText = displayText,
+        -                    isRunning = isRunning,
+        -                    isDarkTheme = isDarkTheme,
+        -                    onAction = onAction
+        -                )
+        +                MainNavBar(onNavigate = onNavigate)
+                     },
+                     floatingActionButton = {},
+                 ) { innerPadding ->
+        @@ -202,6 +198,13 @@ fun MainScreen(
+                                 .fillMaxSize()
+                                 .padding(innerPadding)
+                         ) {
+        +                    ConnectHero(
+        +                        isRunning = isRunning,
+        +                        displayText = displayText,
+        +                        serverName = serverName,
+        +                        onToggle = { onAction(MainAction.ToggleService) },
+        +                        onTest = { onAction(MainAction.TestCurrentServer) }
+        +                    )
+                             if (groups.size > 1) {
+                                 GroupTabBar(
+                                     groups = groups,
+        @@ -252,7 +255,7 @@ fun MainScreen(
+                                         start = 0.dp,
+                                         top = 0.dp,
+                                         end = 0.dp,
+        -                                bottom = 80.dp
+        +                                bottom = 12.dp
+                                     )
+                                 )
+                             }
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt
+        index e324318..8c61b1a 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainServerPager.kt
+        @@ -1,6 +1,7 @@
+         package com.v2ray.ang.ui.main
+         
+         import androidx.compose.foundation.background
+        +import androidx.compose.foundation.border
+         import androidx.compose.foundation.clickable
+         import androidx.compose.foundation.layout.Arrangement
+         import androidx.compose.foundation.layout.Box
+        @@ -27,6 +28,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
+         import androidx.compose.foundation.lazy.itemsIndexed
+         import androidx.compose.foundation.pager.PagerState
+         import androidx.compose.foundation.shape.CircleShape
+        +import androidx.compose.foundation.shape.RoundedCornerShape
+         import androidx.compose.material3.Icon
+         import androidx.compose.material3.IconButton
+         import androidx.compose.material3.MaterialTheme
+        @@ -57,7 +59,6 @@ import com.v2ray.ang.R
+         import com.v2ray.ang.dto.LocateTarget
+         import com.v2ray.ang.dto.entities.ProfileItem
+         import com.v2ray.ang.dto.entities.SubscriptionUsageInfo
+        -import com.v2ray.ang.ui.compose.ItemDivider
+         import com.v2ray.ang.ui.compose.ReorderableGridItem
+         import com.v2ray.ang.ui.compose.ReorderableListItem
+         import com.v2ray.ang.ui.compose.colorConfigType
+        @@ -258,7 +259,7 @@ private fun ServerListPage(
+                                         actions = actions
+                                     )
+                                 }
+        -                        ItemDivider()
+        +                        
+                             }
+                         } else {
+                             ServerItemRow(
+        @@ -266,7 +267,7 @@ private fun ServerListPage(
+                                 isSelected = row.guid == selectedGuid,
+                                 actions = actions
+                             )
+        -                    ItemDivider()
+        +                    
+                         }
+                     }
+                 }
+        @@ -333,7 +334,7 @@ private fun ServerItemColumn(
+                     doubleColumnDisplay = doubleColumnDisplay,
+                     actions = actions
+                 )
+        -        ItemDivider()
+        +        
+             }
+         }
+         
+        @@ -357,6 +358,14 @@ private fun ServerListItem(
+             Row(
+                 modifier = Modifier
+                     .fillMaxWidth()
+        +            .padding(horizontal = 12.dp, vertical = 5.dp)
+        +            .clip(RoundedCornerShape(18.dp))
+        +            .background(MaterialTheme.colorScheme.surfaceContainer)
+        +            .border(
+        +                1.dp,
+        +                if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+        +                RoundedCornerShape(18.dp)
+        +            )
+                     .height(IntrinsicSize.Min)
+                     .semantics {
+                         if (selectedStateDescription != null) {
+        @@ -455,13 +464,22 @@ private fun ServerListItem(
+                             overflow = TextOverflow.Ellipsis
+                         )
+                         Spacer(modifier = Modifier.width(8.dp))
+        -                Text(
+        -                    testResult,
+        -                    style = MaterialTheme.typography.bodySmall,
+        -                    color = if (row.testDelayMillis < 0L) colorPingRed else colorPing,
+        -                    maxLines = 1,
+        -                    overflow = TextOverflow.Ellipsis
+        -                )
+        +                Row(verticalAlignment = Alignment.CenterVertically) {
+        +                    Text(
+        +                        testResult,
+        +                        style = MaterialTheme.typography.bodySmall,
+        +                        color = if (row.testDelayMillis < 0L) colorPingRed else colorPing,
+        +                        maxLines = 1,
+        +                        overflow = TextOverflow.Ellipsis
+        +                    )
+        +                    if (row.testDelayMillis != 0L) {
+        +                        Spacer(modifier = Modifier.width(6.dp))
+        +                        SignalBars(
+        +                            level = pingLevel(row.testDelayMillis),
+        +                            color = if (row.testDelayMillis < 0L) colorPingRed else colorPing
+        +                        )
+        +                    }
+        +                }
+                     }
+                 }
+             }
+        diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainViewModel.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainViewModel.kt
+        index 18fc820..5d8d070 100644
+        --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainViewModel.kt
+        +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainViewModel.kt
+        @@ -263,6 +263,9 @@ class MainViewModel(
+                         )
+                 }
+         
+        +    internal fun selectedServerRemarks(guid: String?): String =
+        +        guid?.let { dataSource.decodeServerConfig(it)?.remarks }.orEmpty()
+        +
+             internal fun serverGroupState(groupId: String): StateFlow<ServerGroupUiState> =
+                 mutableServerGroupState(groupId).asStateFlow()
+         
+        diff --git a/V2rayNG/app/src/main/res/drawable/ic_home_24dp.xml b/V2rayNG/app/src/main/res/drawable/ic_home_24dp.xml
+        new file mode 100644
+        index 0000000..df0f683
+        --- /dev/null
+        +++ b/V2rayNG/app/src/main/res/drawable/ic_home_24dp.xml
+        @@ -0,0 +1,9 @@
+        +<vector xmlns:android="http://schemas.android.com/apk/res/android"
+        +    android:width="24dp"
+        +    android:height="24dp"
+        +    android:viewportWidth="24"
+        +    android:viewportHeight="24">
+        +    <path
+        +        android:fillColor="#FFFFFFFF"
+        +        android:pathData="M10,20v-6h4v6h5v-8h3L12,3 2,12h3v8z" />
+        +</vector>
+        diff --git a/V2rayNG/app/src/main/res/drawable/ic_power_24dp.xml b/V2rayNG/app/src/main/res/drawable/ic_power_24dp.xml
+        new file mode 100644
+        index 0000000..cac1ae9
+        --- /dev/null
+        +++ b/V2rayNG/app/src/main/res/drawable/ic_power_24dp.xml
+        @@ -0,0 +1,9 @@
+        +<vector xmlns:android="http://schemas.android.com/apk/res/android"
+        +    android:width="24dp"
+        +    android:height="24dp"
+        +    android:viewportWidth="24"
+        +    android:viewportHeight="24">
+        +    <path
+        +        android:fillColor="#FFFFFFFF"
+        +        android:pathData="M13,3h-2v10h2V3zM17.83,5.17l-1.42,1.42C17.99,7.86 19,9.81 19,12c0,3.87 -3.13,7 -7,7s-7,-3.13 -7,-7c0,-2.19 1.01,-4.14 2.58,-5.42L6.17,5.17C4.23,6.82 3,9.26 3,12c0,4.97 4.03,9 9,9s9,-4.03 9,-9c0,-2.74 -1.23,-5.18 -3.17,-6.83z" />
+        +</vector>
+        diff --git a/V2rayNG/app/src/main/res/values-fa/strings.xml b/V2rayNG/app/src/main/res/values-fa/strings.xml
+        index 4a4c5df..4cfdbce 100644
+        --- a/V2rayNG/app/src/main/res/values-fa/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values-fa/strings.xml
+        @@ -293,6 +293,9 @@
+             <string name="title_translators">مترجمان</string>
+             <string name="title_tg_channel">کانال تلگرام</string>
+             <string name="title_support_us">حمایت از ما</string>
+        +    <string name="nav_home">خانه</string>
+        +    <string name="connect_tap_on">برای اتصال بزن</string>
+        +    <string name="connect_tap_off">برای قطع اتصال بزن</string>
+         
+             <string name="title_pref_promotion">تبلیغات</string>
+         
+        diff --git a/V2rayNG/app/src/main/res/values/strings.xml b/V2rayNG/app/src/main/res/values/strings.xml
+        index 7498f45..110614b 100644
+        --- a/V2rayNG/app/src/main/res/values/strings.xml
+        +++ b/V2rayNG/app/src/main/res/values/strings.xml
+        @@ -293,6 +293,9 @@
+             <string name="title_translators">Translators</string>
+             <string name="title_tg_channel">Telegram channel</string>
+             <string name="title_support_us">Support Us</string>
+        +    <string name="nav_home">Home</string>
+        +    <string name="connect_tap_on">Tap to Connect</string>
+        +    <string name="connect_tap_off">Tap to Disconnect</string>
+         
+             <string name="title_pref_promotion">Promotion</string>
+         
+        diff --git a/V2rayNG/app/src/main/res/values/themes.xml b/V2rayNG/app/src/main/res/values/themes.xml
+        index 99642da..8bd1306 100644
+        --- a/V2rayNG/app/src/main/res/values/themes.xml
+        +++ b/V2rayNG/app/src/main/res/values/themes.xml
+        @@ -1,6 +1,6 @@
+         <resources>
+        -    <color name="window_background_light">#FF0A0A0B</color>
+        -    <color name="window_background_dark">#FF0A0A0B</color>
+        +    <color name="window_background_light">#FF07040A</color>
+        +    <color name="window_background_dark">#FF07040A</color>
+         
+             <style name="AppThemeBaseCommon" parent="Theme.AppCompat.DayNight.NoActionBar">
+                 <item name="android:statusBarColor">@android:color/transparent</item>
+        THEDNI_PATCH
+
+    - name: Rename app to THEDNI
+      run: |
+        find V2rayNG/app/src/main/res -name strings.xml -exec sed -i \
+          -e 's|<string name="app_name" translatable="false">v2rayNG</string>|<string name="app_name" translatable="false">THEDNI</string>|' \
+          -e 's|\(name="app_widget_name">\)v2rayNG<|\1THEDNI<|' \
+          -e 's|\(name="app_tile_name">\)v2rayNG<|\1THEDNI<|' {} +
+        sed -i 's/"v2rayNG_/"THEDNI_/g' V2rayNG/app/build.gradle.kts
+        echo "Remaining app_name values:"
+        grep -rh 'name="app_name"' V2rayNG/app/src/main/res | sort | uniq -c
+
+    - name: Replace app icon with THEDNI logo
+      run: |
+        python3 -m venv "$RUNNER_TEMP/iconenv"
+        "$RUNNER_TEMP/iconenv/bin/pip" install --quiet pillow
+        "$RUNNER_TEMP/iconenv/bin/python" - <<'PY'
+        import base64
+        import io
+        import os
+        from PIL import Image
+
+        RES = "V2rayNG/app/src/main/res"
+        DENSITY = {"mdpi": 1.0, "hdpi": 1.5, "xhdpi": 2.0, "xxhdpi": 3.0, "xxxhdpi": 4.0}
+
+        # The THEDNI logo (alpha mask of black text) is embedded here, so no upload is needed.
+        # A logo.png in the repository root, if present, overrides it.
+        LOGO_B64 = """
+        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
+        """
+
+        if os.path.exists("logo.png"):
+            logo = Image.open("logo.png").convert("RGBA")
+            print("Using logo.png from the repository")
+        else:
+            mask = Image.open(io.BytesIO(base64.b64decode(LOGO_B64))).convert("L")
+            text_w = 600
+            mask = mask.resize((text_w, round(mask.height * text_w / mask.width)), Image.LANCZOS)
+            ink = Image.new("RGBA", mask.size, (0, 0, 0, 255))
+            ink.putalpha(mask)
+            logo = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
+            logo.alpha_composite(ink, ((1024 - mask.width) // 2, (1024 - mask.height) // 2))
+            print("Using the embedded THEDNI logo")
+
+        def scaled(px):
+            return logo.resize((px, px), Image.LANCZOS)
+
+        for name, scale in DENSITY.items():
+            folder = os.path.join(RES, "mipmap-" + name)
+            # Adaptive icon foreground (108dp canvas); the logo keeps its own margin.
+            scaled(round(108 * scale)).save(os.path.join(folder, "ic_launcher_foreground.png"))
+            # Classic icons (48dp): the logo on a white background.
+            px = round(48 * scale)
+            flat = Image.new("RGBA", (px, px), (255, 255, 255, 255))
+            flat.alpha_composite(scaled(px))
+            flat.save(os.path.join(folder, "ic_launcher.png"))
+            round_path = os.path.join(folder, "ic_launcher_round.png")
+            if os.path.exists(round_path):
+                flat.save(round_path)
+        print("Launcher icons replaced")
+
+        # Notification / status-bar icons: the "T" of the logo as a white silhouette.
+        alpha = logo.split()[3]
+        x0, y0, x1, y1 = alpha.getbbox()
+        end = x1
+        gap = False
+        for x in range(x0, x1):
+            ink = alpha.crop((x, 0, x + 1, alpha.height)).point(lambda v: 255 if v > 40 else 0).getbbox()
+            if ink is None:
+                gap = True
+                end = x
+                break
+        glyph = alpha.crop((x0, y0, end, y1))
+        glyph = glyph.crop(glyph.getbbox())
+        side = max(glyph.size)
+        sq = Image.new("L", (side, side), 0)
+        sq.paste(glyph, ((side - glyph.width) // 2, (side - glyph.height) // 2))
+        for name, scale in DENSITY.items():
+            folder = os.path.join(RES, "drawable-" + name)
+            px = round(24 * scale)
+            inner = round(20 * scale)
+            g = sq.resize((inner, inner), Image.LANCZOS)
+            for icon, color in (("ic_stat_name", 255), ("ic_stat_proxy", 255), ("ic_stat_direct", 255), ("ic_stat_name_black", 0)):
+                path = os.path.join(folder, icon + ".png")
+                if not os.path.exists(path):
+                    continue
+                canvas = Image.new("L", (px, px), 0)
+                canvas.paste(g, ((px - inner) // 2, (px - inner) // 2))
+                out = Image.new("RGBA", (px, px), (color, color, color, 255))
+                out.putalpha(canvas)
+                out.save(path)
+        print("Notification icons replaced (glyph width %d, separated=%s)" % (end - x0, gap))
+        PY
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v4
+      with:
+        log-accepted-android-sdk-licenses: false
+        cmdline-tools-version: '14742923'
+        packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+
+    - name: Install NDK
+      run: |
+        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+          --channel=0 \
+          --install "ndk;30.0.16248370"
+        echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> $GITHUB_ENV
+        sed -i '10i\
+        \
+            ndkVersion = "30.0.16248370"' ${{ github.workspace }}/V2rayNG/app/build.gradle.kts
+
+    - name: Build libhevtun
+      run: |
+        bash compile-hevtun.sh
+
+    - name: Copy libhevtun
+      run: |
+        cp -r ${{ github.workspace }}/libs ${{ github.workspace }}/V2rayNG/app
+
+    - name: Fetch AndroidLibXrayLite tag
+      run: |
+        pushd AndroidLibXrayLite
+        CURRENT_TAG=$(git describe --tags --abbrev=0)
+        echo "Current tag in this repo: $CURRENT_TAG"
+        echo "CURRENT_TAG=$CURRENT_TAG" >> $GITHUB_ENV
+        popd
+
+    - name: Download libv2ray
+      uses: robinraju/release-downloader@v1.13
+      with:
+        repository: '2dust/AndroidLibXrayLite'
+        tag: ${{ env.CURRENT_TAG }}
+        fileName: 'libv2ray.aar'
+        out-file-path: V2rayNG/app/libs/
+
+    - name: Setup Java
+      uses: actions/setup-java@v6.1.0
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+
+    - name: Generate signing key
+      run: |
+        PASS=$(openssl rand -hex 16)
+        echo "::add-mask::$PASS"
+        keytool -genkeypair -keystore "$RUNNER_TEMP/thedni.jks" -alias thedni \
+          -keyalg RSA -keysize 2048 -validity 10000 \
+          -storepass "$PASS" -keypass "$PASS" -dname "CN=THEDNI"
+        echo "KS_PASS=$PASS" >> $GITHUB_ENV
+
+    - name: Build APK
+      run: |
+        cd ${{ github.workspace }}/V2rayNG
+        echo "sdk.dir=${ANDROID_HOME}" > local.properties
+        chmod 755 gradlew
+        ./gradlew assembleRelease \
+          -Pandroid.injected.signing.store.file=$RUNNER_TEMP/thedni.jks \
+          -Pandroid.injected.signing.store.password=$KS_PASS \
+          -Pandroid.injected.signing.key.alias=thedni \
+          -Pandroid.injected.signing.key.password=$KS_PASS
+
+    - name: Upload APKs
+      uses: actions/upload-artifact@v7
+      if: ${{ success() }}
+      with:
+        name: THEDNI-apk
+        path: |
+          ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/*/release/*arm64-v8a*.apk
+          ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/*/release/*universal*.apk
